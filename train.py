@@ -17,14 +17,15 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=512)
     parser.add_argument('--learning_rate', type=float, default=1e-3)
     parser.add_argument('--l2', type=float, default=1e-6)
+    parser.add_argument('--l1', type=float, default=0)
     parser.add_argument('--neg_samples', type=int, default=3)
     parser.add_argument('--use_cuda', type=str2bool, default=False)
-    parser.add_argument('--loss', type=str, default='BPR', choices=['CE', 'BPR', 'OPT1'])
+    parser.add_argument('--loss', type=str, default='BPR', choices=['CE', 'BPR', 'OPT1', 'BPR-PD'])
     parser.add_argument('--model_type', type=str, default='dcnn', choices=['dcnn', 'dcnn_mlp', 'caser', 'cosrec', 'cosrec_base']) # CE/BPR/OPT1
     # model dependent arguments
     model_parser = argparse.ArgumentParser()
     parser.add_argument('--d', type=int, default=50)
-    parser.add_argument('--units', type=str, default='100')
+    parser.add_argument('--units', type=str, default='100,50')
     parser.add_argument('--pool_size', type=str, default='auto')
     parser.add_argument('--drop', type=float, default=0.5)
     parser.add_argument('--ac_conv', type=str, default='leaky_relu')
@@ -35,6 +36,12 @@ if __name__ == '__main__':
 
     # set seed
     set_seed(config.seed, cuda=config.use_cuda)
+
+    if config.use_cuda:
+        print('gpu_is_available: {0}'.format(torch.cuda.is_available()))
+        gpu_count = torch.cuda.device_count()
+        for idx in range(gpu_count):
+            print('gpu {} is {}'.format(idx, torch.cuda.get_device_name(idx)))
 
     # load dataset
     train = Interactions(config.train_root)
@@ -49,6 +56,7 @@ if __name__ == '__main__':
     model = Recommender(n_iter=config.n_iter,
                         batch_size=config.batch_size,
                         learning_rate=config.learning_rate,
+                        l1=config.l1,
                         l2=config.l2,
                         neg_samples=config.neg_samples,
                         loss=config.loss,

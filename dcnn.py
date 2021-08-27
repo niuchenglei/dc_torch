@@ -48,18 +48,21 @@ class DCNN(nn.Module):
         self.user_embeddings = nn.Embedding(num_users, self.dims)
         self.item_embeddings = nn.Embedding(num_items, self.dims)
 
-        self.triu_indices = torch.triu_indices(self.L, self.L, offset=1)
+        self.triu_indices = torch.triu_indices(self.L, self.L, offset=0)
+        permutation_size = self.triu_indices[0].shape[0]
 
         self.convs = nn.Conv1d(2, 4, kernel_size=[1,1], bias=False)
         self.convs.weight.data = torch.FloatTensor([[1, 1], [1, -1], [1, 0], [0, 1]]).reshape(4, 2, 1, 1)
         self.convs.weight.requires_grad = False
 
         self.poolings = [nn.MaxPool2d(kernel_size=(1,x), stride=(1,x//2)) for x in self.pool_size]
+        self.dc_bn = nn.BatchNorm1d(permutation_size)
 
         self.dropout = nn.Dropout(self.drop_ratio)
-        self.ac_fc = activation_getter[self.args.ac_conv]
-        _fc_layers = [nn.LazyLinear(self.units[idx]) for idx in range(0, len(self.units))]
-        self.fc_layers = nn.ModuleList(_fc_layers)
+        self.ac_conv = activation_getter[self.args.ac_conv]
+        self.ac_fc = activation_getter[self.args.ac_fc]
+        self.fc_layers = nn.ModuleList([nn.LazyLinear(self.units[idx]) for idx in range(0, len(self.units))])
+        self.bn_layers = nn.ModuleList([nn.BatchNorm1d(self.units[idx] if idx>0 else permutation_size) for idx in range(0, len(self.units))])
 
         # W2, b2 are encoded with nn.Embedding, as we don't need to compute scores for all items
         self.W2 = nn.Embedding(num_items, self.dims+self.units[-1])
@@ -100,20 +103,28 @@ class DCNN(nn.Module):
         item_j = item_j.repeat(1, 1, self.L, 1).unsqueeze(1)                        # (b, 1, 5, 5, embed)
         all_embs = torch.cat([item_i, item_j], 1)                                   # (b, 2, 5, 5, embed)
         perm_embs = all_embs[:, :, self.triu_indices[0], self.triu_indices[1], :]   # (b, 2, (L*(L-1))/2, embed)
-
+        
         # Convolutional Layers
-        _convs = self.convs(perm_embs)                                              # (b, 4, (L*(L-1))/2, embed)
+        _convs = self.convs(perm_embs)     
         _dots = torch.unsqueeze(perm_embs[:, 0, :, :] * perm_embs[:, 1, :, :], 1)   # (b, 1, (L*(L-1))/2, embed)
         _channels = torch.cat([_convs, _dots], dim=1)                               # (b, 5, (L*(L-1))/2, embed)
 
         _pools = [poolOp(_channels) for poolOp in self.poolings]                    # (b, 5, (L*(L-1))/2, 3/5/7/48)
         _dcout = torch.cat([_channels] + _pools, dim=3)
-        _fc_in = torch.flatten(_dcout, start_dim=1, end_dim=3)                      # (b, :)
+        _dcout = _dcout.permute(0, 2, 1, 3)                                         # (b, (L*(L-1))/2, 5, dim_pool)  // dim_pool = d + d//2 + d//4 + ...
+        _dcout = torch.flatten(_dcout, start_dim=2)                                 # (b,  (L*(L-1))/2, 5*dim_pool)
+        _dcout = self.dc_bn(_dcout)
+        
+        # delay convoluational neural network layer
+        _dcnn = self.fc_layers[0](self.dropout(_dcout))
+        _dcnn = self.ac_conv(self.bn_layers[0](_dcnn))
+        z = torch.flatten(_dcnn, start_dim=1)
+        
+        # full connection layers
+        for idx in range(1, len(self.fc_layers)):
+            linear = self.fc_layers[idx]
+            z = self.ac_fc(self.bn_layers[idx](linear(self.dropout(z))))
 
-        # fully-connected layer
-        z = _fc_in
-        for linear in self.fc_layers:
-            z = self.ac_fc(linear(self.dropout(z)))
         x = torch.cat([z, user_emb.squeeze(1)], dim=1)                              # (: dim+units)
 
         w2 = self.W2(item_var)

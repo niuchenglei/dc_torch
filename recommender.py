@@ -1,4 +1,5 @@
 from time import time
+import math
 
 import torch
 import torch.optim as optim
@@ -45,6 +46,7 @@ class Recommender(object):
     def __init__(self,
                  n_iter=None,
                  batch_size=None,
+                 l1=None,
                  l2=None,
                  neg_samples=None,
                  learning_rate=None,
@@ -63,9 +65,11 @@ class Recommender(object):
         self._batch_size = batch_size
         self._n_iter = n_iter
         self._learning_rate = learning_rate
+        self._l1 = l1
         self._l2 = l2
         self._neg_samples = neg_samples
         self._device = torch.device("cuda" if use_cuda else "cpu")
+        self._use_cuda = use_cuda
         self._loss = loss
         self._model_type = model_type
 
@@ -127,7 +131,7 @@ class Recommender(object):
 
         if not self._initialized:
             self._initialize(train)
-            summary(self._net, input_size=[(5), (1), (6)], input_type=torch.IntTensor)
+            summary(self._net, input_size=[(5), (1), (6)], input_type=torch.cuda.IntTensor if self._use_cuda else torch.IntTensor)
 
         start_epoch = 0
         torch.autograd.set_detect_anomaly(True)
@@ -181,6 +185,10 @@ class Recommender(object):
                 self._optimizer.zero_grad()
 
                 loss = 0.0
+                regularization_loss = 0.0
+                for param in self._net.parameters():
+                    regularization_loss += self._l1 * torch.sum(torch.abs(param))
+
                 if self._loss == 'CE':
                     # compute the binary cross-entropy loss
                     s1 = torch.sigmoid(targets_prediction).clamp(epsilon, 1-epsilon)
@@ -204,7 +212,20 @@ class Recommender(object):
                         hinge = torch.sigmoid(r2 - r1).clamp(epsilon, 1-epsilon) + torch.sigmoid(r2*r2)
                         loss += torch.mean(hinge)
                     loss /= (1e-3+len(targets_pred_array)*len(negatives_pred_array))
+                elif self._loss == 'BPR-PD':
+                    # compute the BPR position discount loss
+                    targets_pred_array = torch.split(targets_prediction, 1, dim=1)
+                    negatives_pred_array = torch.split(negatives_prediction, 1, dim=1)
+                    perm = list(itertools.product(targets_pred_array, negatives_pred_array))
+                    for index in range(0, len(perm)):
+                        r1 = perm[index][0]
+                        r2 = perm[index][1]
+                        position_discount = 1.0 / math.log(2+index//len(negatives_pred_array), 2)
+                        hinge = torch.sigmoid(r1 - r2).clamp(epsilon, 1-epsilon)
+                        loss += (torch.mean(torch.log(hinge)) * position_discount)
+                    loss /= -(1e-3+len(targets_pred_array)*len(negatives_pred_array))
 
+                loss += regularization_loss
                 epoch_loss += loss.item()
 
                 loss.backward()
@@ -214,21 +235,29 @@ class Recommender(object):
             epoch_loss /= minibatch_num + 1
 
             t2 = time()
-            if verbose and (epoch_num + 1) % 5 == 0:
-                precision, recall, mean_aps = evaluate_ranking(self, test, train, k=[1, 5, 10])
+            if verbose and (epoch_num + 1) % 1 == 0:
+                precision, recall, mean_aps, ndcg, mrr = evaluate_ranking(self, test, train, k=[1, 5, 10])
                 output_str = "Epoch %d [%.1f s]\tloss=%.4f, map=%.4f, " \
                              "prec@1=%.4f, prec@5=%.4f, prec@10=%.4f, " \
-                             "recall@1=%.4f, recall@5=%.4f, recall@10=%.4f, [%.1f s]" % (epoch_num + 1,
-                                                                                         t2 - t1,
-                                                                                         epoch_loss,
-                                                                                         mean_aps,
-                                                                                         np.mean(precision[0]),
-                                                                                         np.mean(precision[1]),
-                                                                                         np.mean(precision[2]),
-                                                                                         np.mean(recall[0]),
-                                                                                         np.mean(recall[1]),
-                                                                                         np.mean(recall[2]),
-                                                                                         time() - t2)
+                             "recall@1=%.4f, recall@5=%.4f, recall@10=%.4f, " \
+                             "ndcg@1=%.4f, ndcg@5=%.4f, ndcg@10=%.4f, " \
+                             "mrr@1=%.4f, mrr@5=%.4f, mrr@10=%.4f, [%.1f s]" % (epoch_num + 1,
+                                                                                t2 - t1,
+                                                                                epoch_loss,
+                                                                                mean_aps,
+                                                                                np.mean(precision[0]),
+                                                                                np.mean(precision[1]),
+                                                                                np.mean(precision[2]),
+                                                                                np.mean(recall[0]),
+                                                                                np.mean(recall[1]),
+                                                                                np.mean(recall[2]),
+                                                                                np.mean(ndcg[0]),
+                                                                                np.mean(ndcg[1]),
+                                                                                np.mean(ndcg[2]),
+                                                                                np.mean(mrr[0]),
+                                                                                np.mean(mrr[1]),
+                                                                                np.mean(mrr[2]),
+                                                                                time() - t2)
                 print(output_str)
             else:
                 output_str = "Epoch %d [%.1f s]\tloss=%.4f [%.1f s]" % (epoch_num + 1,

@@ -28,6 +28,32 @@ def _compute_precision_recall(targets, predictions, k):
     recall = float(num_hit) / len(targets)
     return precision, recall
 
+def _dcg(scores):
+    return np.sum(np.divide(np.power(2, scores) - 1, np.log2(np.arange(scores.shape[0], dtype=np.float32) + 2)), dtype=np.float32)
+
+def _compute_ndcg(targets, predictions, k):
+    if len(predictions) > k:
+        predictions = predictions[:k]
+
+    relevance = np.ones_like(targets)
+    it2rel = {it: r for it, r in zip(targets, relevance)}
+    rank_scores = np.asarray([it2rel.get(it, 0.0) for it in predictions], dtype=np.float32)
+
+    idcg = _dcg(relevance)
+    dcg = _dcg(rank_scores)
+
+    if dcg == 0.0:
+        return 0.0
+
+    ndcg = dcg / idcg
+    return ndcg
+
+
+def _compute_mrr(targets, predictions, k):
+    pred = predictions[:k]
+    exist = [int(x in targets) for x in pred]
+    factor = [1.0/x for x in range(1, k+1)]
+    return np.sum(np.array(exist)*np.array(factor)) / k
 
 def evaluate_ranking(model, test, train=None, k=10):
     """
@@ -62,6 +88,8 @@ def evaluate_ranking(model, test, train=None, k=10):
 
     precisions = [list() for _ in range(len(ks))]
     recalls = [list() for _ in range(len(ks))]
+    ndcgs = [list() for _ in range(len(ks))]
+    mrrs = [list() for _ in range(len(ks))]
     apks = list()
 
     for user_id, row in enumerate(test):
@@ -79,6 +107,7 @@ def evaluate_ranking(model, test, train=None, k=10):
 
         predictions = [p for p in predictions if p not in rated]
 
+        # each user has different target length
         targets = row.indices
 
         for i, _k in enumerate(ks):
@@ -86,7 +115,14 @@ def evaluate_ranking(model, test, train=None, k=10):
             precisions[i].append(precision)
             recalls[i].append(recall)
 
+            ndcg = _compute_ndcg(targets, predictions, _k)
+            ndcgs[i].append(ndcg)
+
+            mrr = _compute_mrr(targets, predictions, _k)
+            mrrs[i].append(mrr)
+
         apks.append(_compute_apk(targets, predictions, k=np.inf))
+
 
     precisions = [np.array(i) for i in precisions]
     recalls = [np.array(i) for i in recalls]
@@ -97,5 +133,5 @@ def evaluate_ranking(model, test, train=None, k=10):
 
     mean_aps = np.mean(apks)
 
-    return precisions, recalls, mean_aps
+    return precisions, recalls, mean_aps, ndcgs, mrrs
 
